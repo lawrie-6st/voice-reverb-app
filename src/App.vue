@@ -1,10 +1,10 @@
 <script setup>
-import VoiceReverb from './components/VoiceReverb.vue'
+import MultiEffecter from './components/MultiEffecter.vue'
 </script>
 
 <template>
   <div class="app-container">
-    <VoiceReverb />
+    <MultiEffecter />
   </div>
 </template>
 
