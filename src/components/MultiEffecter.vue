@@ -2,6 +2,21 @@
   <div class="reverb-container">
     <h1>🎛️ Multi Effecter</h1>
 
+    <div class="piano-section">
+      <div class="piano-keyboard">
+        <button
+          v-for="key in pianoKeys"
+          :key="key.note"
+          :class="['piano-key', { 'black-key': key.isBlack, 'white-key': !key.isBlack }]"
+          @mousedown="playNote(key.frequency)"
+          @mouseup="stopNote"
+          @mouseleave="stopNote"
+        >
+          <span class="key-label">{{ key.label }}</span>
+        </button>
+      </div>
+    </div>
+
     <div class="reverb-section">
       <div class="reverb-toggle">
         <label class="toggle-label">
@@ -126,14 +141,14 @@
     </div>
 
     <button class="main-btn start-btn" @click="startAudio" :disabled="isActive">
-      マイクを開始
+      準備完了
     </button>
     <button class="main-btn stop-btn" @click="stopAudio" :disabled="!isActive">
       停止
     </button>
 
     <div class="status" :class="{ active: isActive, inactive: !isActive }">
-      {{ isActive ? 'マイクが動作中です' : 'マイクが停止中です' }}
+      {{ isActive ? '演奏可能です' : '停止中です' }}
     </div>
   </div>
 </template>
@@ -162,8 +177,25 @@ const compressorKnee = ref(30)
 const compressorAttack = ref(0.003)
 const compressorRelease = ref(0.25)
 
+// Piano keys data (C4 to B4 - one octave)
+const pianoKeys = ref([
+  { note: 'C4', frequency: 261.63, label: 'C', isBlack: false },
+  { note: 'C#4', frequency: 277.18, label: 'C#', isBlack: true },
+  { note: 'D4', frequency: 293.66, label: 'D', isBlack: false },
+  { note: 'D#4', frequency: 311.13, label: 'D#', isBlack: true },
+  { note: 'E4', frequency: 329.63, label: 'E', isBlack: false },
+  { note: 'F4', frequency: 349.23, label: 'F', isBlack: false },
+  { note: 'F#4', frequency: 369.99, label: 'F#', isBlack: true },
+  { note: 'G4', frequency: 392.00, label: 'G', isBlack: false },
+  { note: 'G#4', frequency: 415.30, label: 'G#', isBlack: true },
+  { note: 'A4', frequency: 440.00, label: 'A', isBlack: false },
+  { note: 'A#4', frequency: 466.16, label: 'A#', isBlack: true },
+  { note: 'B4', frequency: 493.88, label: 'B', isBlack: false }
+])
+
 let audioContext = null
-let microphone = null
+let oscillator = null
+let oscillatorGain = null
 let convolver = null
 let distortion = null
 let distortionDryGain = null
@@ -172,7 +204,6 @@ let compressor = null
 let dryGain = null
 let wetGain = null
 let masterGain = null
-let stream = null
 
 // リバーブのインパルスレスポンスを生成
 function createReverbImpulse(duration, decay) {
@@ -208,14 +239,8 @@ function makeDistortionCurve(amount) {
 
 async function startAudio() {
   try {
-    // マイクアクセスを要求
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-
     // Audio Contextを作成
     audioContext = new (window.AudioContext || window.webkitAudioContext)()
-
-    // マイク入力ノード
-    microphone = audioContext.createMediaStreamSource(stream)
 
     // Convolverノード（リバーブ）
     convolver = audioContext.createConvolver()
@@ -229,31 +254,35 @@ async function startAudio() {
     masterGain = audioContext.createGain()
     masterGain.gain.value = volume.value / 100
 
+    // Oscillator用のゲイン
+    oscillatorGain = audioContext.createGain()
+    oscillatorGain.gain.value = 0
+
     // ミックス比を設定
     updateMix()
 
-    // 接続: マイク -> dry -> マスター -> スピーカー
-    microphone.connect(dryGain)
+    // 接続: oscillatorGain -> dry -> マスター
+    oscillatorGain.connect(dryGain)
     dryGain.connect(masterGain)
 
-    // 接続: マイク -> リバーブ -> wet -> マスター -> スピーカー
-    microphone.connect(convolver)
+    // 接続: oscillatorGain -> リバーブ -> wet -> マスター
+    oscillatorGain.connect(convolver)
     convolver.connect(wetGain)
     wetGain.connect(masterGain)
 
+    // 最終的にスピーカーへ
     masterGain.connect(audioContext.destination)
 
     isActive.value = true
   } catch (error) {
-    console.error('マイクアクセスエラー:', error)
-    alert('マイクへのアクセスが拒否されました。ブラウザの設定を確認してください。')
+    console.error('Audio初期化エラー:', error)
+    alert('オーディオの初期化に失敗しました。')
   }
 }
 
 function stopAudio() {
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop())
-  }
+  // 再生中の音を停止
+  stopNote()
 
   if (audioContext) {
     audioContext.close()
@@ -261,12 +290,48 @@ function stopAudio() {
 
   isActive.value = false
   audioContext = null
-  microphone = null
+  oscillator = null
+  oscillatorGain = null
   convolver = null
   dryGain = null
   wetGain = null
   masterGain = null
-  stream = null
+}
+
+function playNote(frequency) {
+  if (!audioContext || !isActive.value) return
+
+  // 既に再生中の音があれば停止
+  stopNote()
+
+  // 新しいオシレーターを作成
+  oscillator = audioContext.createOscillator()
+  oscillator.type = 'sine'
+  oscillator.frequency.value = frequency
+
+  // オシレーターをゲインに接続
+  oscillator.connect(oscillatorGain)
+
+  // ADSR エンベロープを適用(Attack)
+  oscillatorGain.gain.cancelScheduledValues(audioContext.currentTime)
+  oscillatorGain.gain.setValueAtTime(0, audioContext.currentTime)
+  oscillatorGain.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.01)
+
+  // 音を開始
+  oscillator.start()
+}
+
+function stopNote() {
+  if (oscillator && oscillatorGain && audioContext) {
+    // Release エンベロープを適用
+    oscillatorGain.gain.cancelScheduledValues(audioContext.currentTime)
+    oscillatorGain.gain.setValueAtTime(oscillatorGain.gain.value, audioContext.currentTime)
+    oscillatorGain.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.1)
+
+    // 少し後に停止
+    oscillator.stop(audioContext.currentTime + 0.1)
+    oscillator = null
+  }
 }
 
 function updateReverb() {
@@ -319,22 +384,22 @@ function toggleDistortion() {
     dryGain.disconnect()
     wetGain.disconnect()
 
-    // マイク -> distortionDry -> マスター
-    microphone.connect(distortionDryGain)
+    // oscillatorGain -> distortionDry -> マスター
+    oscillatorGain.connect(distortionDryGain)
     distortionDryGain.connect(masterGain)
 
-    // マイク -> distortion -> distortionWet -> マスター
-    microphone.connect(distortion)
+    // oscillatorGain -> distortion -> distortionWet -> マスター
+    oscillatorGain.connect(distortion)
     distortion.connect(distortionWetGain)
     distortionWetGain.connect(masterGain)
 
     // リバーブの接続も再構築
-    microphone.connect(convolver)
+    oscillatorGain.connect(convolver)
     convolver.connect(wetGain)
     wetGain.connect(masterGain)
 
     // Dry信号の接続
-    microphone.connect(dryGain)
+    oscillatorGain.connect(dryGain)
     dryGain.connect(masterGain)
   } else {
     // ディストーションを無効化
@@ -351,10 +416,10 @@ function toggleDistortion() {
       dryGain.disconnect()
       wetGain.disconnect()
 
-      microphone.connect(dryGain)
+      oscillatorGain.connect(dryGain)
       dryGain.connect(masterGain)
 
-      microphone.connect(convolver)
+      oscillatorGain.connect(convolver)
       convolver.connect(wetGain)
       wetGain.connect(masterGain)
     }
@@ -692,5 +757,88 @@ input[type="range"]::-moz-range-thumb:hover {
   margin-top: 20px;
   padding-top: 20px;
   border-top: 2px solid #e0e0e0;
+}
+
+.piano-section {
+  margin: 30px 0;
+  padding: 20px;
+  background: #2c2c2c;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.piano-keyboard {
+  display: flex;
+  gap: 2px;
+  justify-content: center;
+  align-items: flex-end;
+  position: relative;
+  height: 180px;
+}
+
+.piano-key {
+  position: relative;
+  border: none;
+  cursor: pointer;
+  transition: all 0.1s ease;
+  font-weight: 600;
+  user-select: none;
+}
+
+.white-key {
+  width: 50px;
+  height: 180px;
+  background: linear-gradient(to bottom, #ffffff 0%, #f0f0f0 100%);
+  border: 1px solid #ccc;
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  z-index: 1;
+}
+
+.white-key:hover {
+  background: linear-gradient(to bottom, #f0f0f0 0%, #e0e0e0 100%);
+  transform: translateY(2px);
+}
+
+.white-key:active {
+  background: linear-gradient(to bottom, #e0e0e0 0%, #d0d0d0 100%);
+  transform: translateY(4px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.black-key {
+  width: 32px;
+  height: 110px;
+  background: linear-gradient(to bottom, #2c2c2c 0%, #1a1a1a 100%);
+  border: 1px solid #000;
+  border-radius: 0 0 4px 4px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+  margin: 0 -17px;
+  z-index: 2;
+}
+
+.black-key .key-label {
+  color: #fff;
+}
+
+.black-key:hover {
+  background: linear-gradient(to bottom, #3a3a3a 0%, #2c2c2c 100%);
+  transform: translateY(2px);
+}
+
+.black-key:active {
+  background: linear-gradient(to bottom, #1a1a1a 0%, #0a0a0a 100%);
+  transform: translateY(4px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+}
+
+.key-label {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: #333;
+  pointer-events: none;
 }
 </style>
